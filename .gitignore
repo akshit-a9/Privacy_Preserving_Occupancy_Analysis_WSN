@@ -76,3 +76,5 @@ notebooks/*.svg
 
 # ─── docs/ — keep PDFs, ignore nothing else special ──────────────────────────
 # PDFs in docs/ are intentionally kept (not ignored).
+
+cyclic_exec/
