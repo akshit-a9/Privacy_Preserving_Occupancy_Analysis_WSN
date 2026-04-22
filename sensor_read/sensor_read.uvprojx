@@ -429,6 +429,16 @@
               <FileType>5</FileType>
               <FilePath>.\radar.h</FilePath>
             </File>
+            <File>
+              <FileName>occupancy.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\occupancy.c</FilePath>
+            </File>
+            <File>
+              <FileName>occupancy.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\occupancy.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
