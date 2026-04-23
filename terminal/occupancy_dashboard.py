@@ -1,9 +1,13 @@
 """
-DNES terminal-side occupancy classifier.
+DNES terminal-side occupancy classifier / firmware verifier.
 
-Reads the STM32 CSV stream (t_ms,acoustic,vibration,presence,radar_hex)
-over USB serial, runs an EWMA smoother + weighted Congestion Index,
-classifies into EMPTY / LOW / MED / HIGH, and renders a live dashboard.
+Reads the STM32 CSV stream
+    t_ms, acoustic, vibration, presence, range, ci_milli, class
+over USB serial, runs an EWMA smoother + weighted Congestion Index
+(mirror of sensor_read/occupancy.c), classifies into EMPTY/LOW/MED/HIGH,
+and renders a live dashboard. The firmware reports its own CI and class
+on every line — both are shown so you can confirm the board matches the
+Python reference after retuning.
 
 Use --replay to iterate on weights against a previously logged CSV
 without the board attached.
@@ -35,6 +39,8 @@ CLASS_COLORS = {
     "HIGH":  "red",
 }
 
+FW_CLASS = {"E": "EMPTY", "L": "LOW", "M": "MED", "H": "HIGH"}
+
 
 @dataclass
 class Config:
@@ -51,6 +57,7 @@ class Config:
     t_med: float
     t_high: float
     calib: int
+    stuck_samples: int
 
 
 @dataclass
@@ -59,6 +66,9 @@ class State:
     a_raw: int = 0
     v_raw: int = 0
     p_raw: int = 0
+    r_raw: int = -1          # mmWave range; -1 = no target
+    fw_ci: float = 0.0       # firmware-reported CI (ci_milli/1000)
+    fw_cls: str = "EMPTY"    # firmware-reported class
     a_ewma: float = 0.0
     v_ewma: float = 0.0
     p_ewma: float = 0.0
@@ -73,6 +83,9 @@ class State:
     a_buf: deque = field(default_factory=lambda: deque(maxlen=1))
     v_buf: deque = field(default_factory=lambda: deque(maxlen=1))
     initialised: bool = False
+    a_last_change: int = 0   # value of s.n when raw last differed
+    v_last_change: int = 0
+    r_last_change: int = 0
 
 
 def parse_args() -> Config:
@@ -94,6 +107,9 @@ def parse_args() -> Config:
     ap.add_argument("--t-high", type=float, default=0.70)
     ap.add_argument("--calib", type=int, default=30,
                     help="Samples used to learn acoustic/vibration noise floor")
+    ap.add_argument("--stuck-samples", type=int, default=30,
+                    help="Flag a sensor as missing if its raw value hasn't "
+                         "changed for this many samples (30 = 3 s at 10 Hz)")
     a = ap.parse_args()
     return Config(
         port=a.port, baud=a.baud,
@@ -102,6 +118,7 @@ def parse_args() -> Config:
         lam=a.lam, alpha=a.alpha, beta=a.beta, gamma=a.gamma,
         t_low=a.t_low, t_med=a.t_med, t_high=a.t_high,
         calib=a.calib,
+        stuck_samples=a.stuck_samples,
     )
 
 
@@ -164,20 +181,33 @@ def replay_source(cfg: Config) -> Iterator[str]:
             yield text
 
 
-def parse_line(text: str) -> Optional[Tuple[int, int, int, int]]:
+def parse_line(text: str) -> Optional[Tuple[int, int, int, int, int, int, str]]:
     if text.startswith("#"):
         return None
     parts = text.split(",")
-    if len(parts) < 4:
+    if len(parts) < 7:
         return None
     try:
-        return int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+        t_ms      = int(parts[0])
+        acoustic  = int(parts[1])
+        vibration = int(parts[2])
+        presence  = int(parts[3])
+        rng       = int(parts[4])
+        ci_milli  = int(parts[5])
     except ValueError:
         return None
+    cls_ch = parts[6].strip()[:1]
+    if cls_ch not in FW_CLASS:
+        return None
+    return t_ms, acoustic, vibration, presence, rng, ci_milli, cls_ch
 
 
-def update_state(s: State, sample: Tuple[int, int, int, int], cfg: Config) -> None:
-    t_ms, acoustic, vibration, presence = sample
+def update_state(
+    s: State,
+    sample: Tuple[int, int, int, int, int, int, str],
+    cfg: Config,
+) -> None:
+    t_ms, acoustic, vibration, presence, rng, ci_milli, cls_ch = sample
 
     if not s.initialised:
         s.a_ewma, s.v_ewma, s.p_ewma = float(acoustic), float(vibration), float(presence)
@@ -209,8 +239,15 @@ def update_state(s: State, sample: Tuple[int, int, int, int], cfg: Config) -> No
     s.ci = cfg.alpha * p_norm + cfg.beta * s.v_norm + cfg.gamma * s.a_norm
     s.cls = classify(s.ci, cfg) if not s.calibrating else "EMPTY"
 
+    if s.n == 0 or acoustic  != s.a_raw: s.a_last_change = s.n
+    if s.n == 0 or vibration != s.v_raw: s.v_last_change = s.n
+    if s.n == 0 or rng       != s.r_raw: s.r_last_change = s.n
+
     s.t_ms = t_ms
     s.a_raw, s.v_raw, s.p_raw = acoustic, vibration, presence
+    s.r_raw = rng
+    s.fw_ci = ci_milli / 1000.0
+    s.fw_cls = FW_CLASS[cls_ch]
     s.n += 1
 
 
@@ -219,26 +256,47 @@ def render(s: State, cfg: Config) -> Panel:
 
     big = Text(s.cls.center(40), style=f"bold {color}")
 
+    def health_tag(last_change: int) -> str:
+        if s.n < cfg.stuck_samples:
+            return ""  # not enough data yet — stay quiet during warmup
+        if (s.n - last_change) >= cfg.stuck_samples:
+            return "  [red bold]MISSING?[/red bold]"
+        return "  [green]ok[/green]"
+
     tbl = Table.grid(padding=(0, 2))
     tbl.add_column(justify="right", style="cyan", no_wrap=True)
     tbl.add_column(justify="left", no_wrap=True)
     tbl.add_row(
         "Acoustic",
         f"{s.a_raw:4d}  ewma={s.a_ewma:7.1f}  base={s.a_base:6.1f}  "
-        f"[{bar(s.a_norm, 20)}] {s.a_norm:.2f}",
+        f"[{bar(s.a_norm, 20)}] {s.a_norm:.2f}"
+        + health_tag(s.a_last_change),
     )
     tbl.add_row(
         "Vibration",
         f"{s.v_raw:4d}  ewma={s.v_ewma:7.1f}  base={s.v_base:6.1f}  "
-        f"[{bar(s.v_norm, 20)}] {s.v_norm:.2f}",
+        f"[{bar(s.v_norm, 20)}] {s.v_norm:.2f}"
+        + health_tag(s.v_last_change),
     )
     tbl.add_row(
         "Presence",
         f"{s.p_raw:4d}  ewma={s.p_ewma:5.2f}                 "
         f"[{bar(s.p_ewma, 20)}] {s.p_ewma:.2f}",
     )
+    range_str = "no target" if s.r_raw < 0 else f"{s.r_raw}"
+    tbl.add_row("Range (mmWave)", range_str + health_tag(s.r_last_change))
 
     ci_line = Text(f"CI = {s.ci:.3f}  [{bar(s.ci, 40)}]", style=f"bold {color}")
+
+    fw_color = CLASS_COLORS[s.fw_cls]
+    fw_line = Text.assemble(
+        ("firmware   ", "dim"),
+        (f"{s.fw_cls:<5}", f"bold {fw_color}"),
+        ("   CI=", "dim"),
+        (f"{s.fw_ci:.3f}", fw_color),
+        ("   Δ(py−fw)=", "dim"),
+        (f"{s.ci - s.fw_ci:+.3f}", "dim"),
+    )
 
     weights = Text(
         f"alpha={cfg.alpha:.2f}  beta={cfg.beta:.2f}  gamma={cfg.gamma:.2f}   "
@@ -259,6 +317,7 @@ def render(s: State, cfg: Config) -> Panel:
         Align.center(big),
         Text(""),
         Align.center(ci_line),
+        Align.center(fw_line),
         Text(""),
         tbl,
         Text(""),
