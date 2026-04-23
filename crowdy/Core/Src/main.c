@@ -83,6 +83,7 @@ volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window
 #define VIB_LOW_THR     113.0f
 #define VIB_MED_THR     150.0f
 #define VIB_HIGH_THR    200.0f
+#define VIB_INVALID_THR 2000.0f    /* reading above this => sensor unplugged, ignore */
 
 /* Radar uses inverted thresholds: closer range => more crowded.
      presence OFF, no samples, OR range > EMPTY_THR -> EMPTY
@@ -182,7 +183,10 @@ last_print = HAL_GetTick();
                          : 0u;
 
     uint8_t lvl_mic = classify(mic_rms, MIC_LOW_THR, MIC_MED_THR, MIC_HIGH_THR);
-    uint8_t lvl_vib = classify(vib_avg, VIB_LOW_THR, VIB_MED_THR, VIB_HIGH_THR);
+    uint8_t vib_valid = (vib_avg <= VIB_INVALID_THR);
+    uint8_t lvl_vib = vib_valid
+                      ? classify(vib_avg, VIB_LOW_THR, VIB_MED_THR, VIB_HIGH_THR)
+                      : 0;
 
     /* Radar: inverted — closer => more crowded. Presence OFF, no samples,
        or range beyond EMPTY_THR all short-circuit to EMPTY. */
@@ -193,17 +197,20 @@ last_print = HAL_GetTick();
     else if(range_avg >  RADAR_HIGH_THR)     lvl_rad = 2;
     else                                     lvl_rad = 3;
 
-    float w_sum   = W_MIC + W_VIB + W_RADAR;
-    float lvl_num = (W_MIC * lvl_mic + W_VIB * lvl_vib + W_RADAR * lvl_rad) / w_sum;
+    float w_vib_eff = vib_valid ? W_VIB : 0.0f;
+    float w_sum   = W_MIC + w_vib_eff + W_RADAR;
+    float lvl_num = (W_MIC * lvl_mic + w_vib_eff * lvl_vib + W_RADAR * lvl_rad) / w_sum;
     uint8_t lvl_combined = (uint8_t)(lvl_num + 0.5f);   /* round */
     if(lvl_combined > 3) lvl_combined = 3;
 
+    char vib_lvl_ch = vib_valid ? (char)('0' + lvl_vib) : '-';
+
     char msg[160];
     snprintf(msg, sizeof(msg),
-        "RMS: %.2f | VIB: %.2f | RADAR: %s R=%u avg=%u | M:%u V:%u R:%u => %s\r\n",
+        "RMS: %.2f | VIB: %.2f | RADAR: %s R=%u avg=%u | M:%u V:%c R:%u => %s\r\n",
         mic_rms, vib_avg,
         ld_presence ? "ON " : "OFF", ld_range_cm, range_avg,
-        lvl_mic, lvl_vib, lvl_rad, level_name(lvl_combined));
+        lvl_mic, vib_lvl_ch, lvl_rad, level_name(lvl_combined));
 
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 }
