@@ -64,14 +64,48 @@ static uint8_t  ld_rx_byte;
 static char     ld_line[LD_LINE_MAX];
 static uint8_t  ld_line_len = 0;
 volatile uint8_t  ld_presence = 0;   /* 1 = ON, 0 = OFF */
-volatile uint16_t ld_range_cm = 0;   /* last reported range */
+volatile uint16_t ld_range_cm = 0;   /* last reported range (for display) */
 volatile uint32_t ld_last_rx = 0;    /* HAL tick of last valid line */
+volatile uint32_t ld_range_sum = 0;  /* sum of range samples in current window */
+volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window */
+
+/* ---- Occupancy thresholds (TUNE IN LAB) -------------------------------
+   Mic & vibration: 0=EMPTY,1=LOW,2=MED,3=HIGH based on plain thresholds.
+     x < LOW_THR          -> EMPTY
+     LOW_THR <= x < MED   -> LOW
+     MED_THR <= x < HIGH  -> MEDIUM
+     x >= HIGH_THR        -> HIGH
+   Measured single-occupant values: mic RMS ~1615, vib ~122. */
+#define MIC_LOW_THR     1600.0f
+#define MIC_MED_THR     1800.0f
+#define MIC_HIGH_THR    2000.0f
+
+#define VIB_LOW_THR     113.0f
+#define VIB_MED_THR     150.0f
+#define VIB_HIGH_THR    200.0f
+#define VIB_INVALID_THR 2000.0f    /* reading above this => sensor unplugged, ignore */
+
+/* Radar uses inverted thresholds: closer range => more crowded.
+     presence OFF, no samples, OR range > EMPTY_THR -> EMPTY
+     LOW_THR  < range <= EMPTY_THR                  -> LOW
+     HIGH_THR < range <= LOW_THR                    -> MEDIUM
+     range <= HIGH_THR                              -> HIGH  */
+#define RADAR_EMPTY_THR 400       /* range in cm */
+#define RADAR_LOW_THR   250
+#define RADAR_HIGH_THR  100
+
+/* Fusion weights (need not sum to 1; combined level is the rounded
+   weighted mean of the per-sensor levels). */
+#define W_MIC   1.0f
+#define W_VIB   1.0f
+#define W_RADAR 1.5f
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+static uint8_t classify(float x, float t_low, float t_med, float t_high);
+static const char* level_name(uint8_t lvl);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -143,11 +177,40 @@ last_print = HAL_GetTick();
         vib_avg = baseline - ((float)vib_acc / sample_count);
     }
 
-    char msg[128];
+    /* windowed average radar range (cm), 0 if no samples yet */
+    uint16_t range_avg = (ld_range_n > 0)
+                         ? (uint16_t)(ld_range_sum / ld_range_n)
+                         : 0u;
+
+    uint8_t lvl_mic = classify(mic_rms, MIC_LOW_THR, MIC_MED_THR, MIC_HIGH_THR);
+    uint8_t vib_valid = (vib_avg <= VIB_INVALID_THR);
+    uint8_t lvl_vib = vib_valid
+                      ? classify(vib_avg, VIB_LOW_THR, VIB_MED_THR, VIB_HIGH_THR)
+                      : 0;
+
+    /* Radar: inverted — closer => more crowded. Presence OFF, no samples,
+       or range beyond EMPTY_THR all short-circuit to EMPTY. */
+    uint8_t lvl_rad;
+    if(!ld_presence || ld_range_n == 0)      lvl_rad = 0;
+    else if(range_avg >  RADAR_EMPTY_THR)    lvl_rad = 0;
+    else if(range_avg >  RADAR_LOW_THR)      lvl_rad = 1;
+    else if(range_avg >  RADAR_HIGH_THR)     lvl_rad = 2;
+    else                                     lvl_rad = 3;
+
+    float w_vib_eff = vib_valid ? W_VIB : 0.0f;
+    float w_sum   = W_MIC + w_vib_eff + W_RADAR;
+    float lvl_num = (W_MIC * lvl_mic + w_vib_eff * lvl_vib + W_RADAR * lvl_rad) / w_sum;
+    uint8_t lvl_combined = (uint8_t)(lvl_num + 0.5f);   /* round */
+    if(lvl_combined > 3) lvl_combined = 3;
+
+    char vib_lvl_ch = vib_valid ? (char)('0' + lvl_vib) : '-';
+
+    char msg[160];
     snprintf(msg, sizeof(msg),
-        "RAW: M=%u V=%u | RMS: %.2f | VIB: %.2f | RADAR: %s R=%u\r\n",
-        adc_vals[0], adc_vals[1], mic_rms, vib_avg,
-        ld_presence ? "ON " : "OFF", ld_range_cm);
+        "RMS: %.2f | VIB: %.2f | RADAR: %s R=%u avg=%u | M:%u V:%c R:%u => %s\r\n",
+        mic_rms, vib_avg,
+        ld_presence ? "ON " : "OFF", ld_range_cm, range_avg,
+        lvl_mic, vib_lvl_ch, lvl_rad, level_name(lvl_combined));
 
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 }
@@ -159,6 +222,9 @@ if(HAL_GetTick() - window_start >= 5000)  // 5 sec window
         mic_acc = 0;
         vib_acc = 0;
         sample_count = 0;
+
+        ld_range_sum = 0;
+        ld_range_n   = 0;
     }
   }
   /* USER CODE END 3 */
@@ -248,7 +314,27 @@ static void ld_parse_line(const char *s, uint8_t n)
             if(v > 65535) return;
         }
         ld_range_cm = (uint16_t)v;
+        ld_range_sum += v;
+        ld_range_n++;
         ld_last_rx = HAL_GetTick();
+    }
+}
+
+static uint8_t classify(float x, float t_low, float t_med, float t_high)
+{
+    if(x < t_low)  return 0;
+    if(x < t_med)  return 1;
+    if(x < t_high) return 2;
+    return 3;
+}
+
+static const char* level_name(uint8_t lvl)
+{
+    switch(lvl) {
+        case 0:  return "EMPTY";
+        case 1:  return "LOW";
+        case 2:  return "MEDIUM";
+        default: return "HIGH";
     }
 }
 
