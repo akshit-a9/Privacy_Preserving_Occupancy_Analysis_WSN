@@ -57,6 +57,15 @@ uint32_t sample_count = 0;
 
 uint32_t last_print = 0;
 uint32_t window_start = 0;
+
+/* LD2420 line-assembly + parsed state */
+#define LD_LINE_MAX 32
+static uint8_t  ld_rx_byte;
+static char     ld_line[LD_LINE_MAX];
+static uint8_t  ld_line_len = 0;
+volatile uint8_t  ld_presence = 0;   /* 1 = ON, 0 = OFF */
+volatile uint16_t ld_range_cm = 0;   /* last reported range */
+volatile uint32_t ld_last_rx = 0;    /* HAL tick of last valid line */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -103,7 +112,9 @@ int main(void)
   MX_ADC1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+MX_USART1_UART_Init();
 HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_vals, 2);
+HAL_UART_Receive_IT(&huart1, &ld_rx_byte, 1);
 
 window_start = HAL_GetTick();
 last_print = HAL_GetTick();
@@ -132,10 +143,11 @@ last_print = HAL_GetTick();
         vib_avg = baseline - ((float)vib_acc / sample_count);
     }
 
-    char msg[100];
+    char msg[128];
     snprintf(msg, sizeof(msg),
-        "RAW: M=%u V=%u | RMS: %.2f | VIB: %.2f\r\n",
-        adc_vals[0], adc_vals[1], mic_rms, vib_avg);
+        "RAW: M=%u V=%u | RMS: %.2f | VIB: %.2f | RADAR: %s R=%u\r\n",
+        adc_vals[0], adc_vals[1], mic_rms, vib_avg,
+        ld_presence ? "ON " : "OFF", ld_range_cm);
 
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 }
@@ -212,6 +224,50 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
         vib_acc += vib;
 
         sample_count++;
+    }
+}
+
+/* Parse a single completed line from the LD2420.
+   Expected tokens: "ON", "OFF", "Range <cm>". Unknown lines ignored. */
+static void ld_parse_line(const char *s, uint8_t n)
+{
+    while(n && (s[n-1] == ' ' || s[n-1] == '\t')) n--;
+    if(n == 0) return;
+
+    if(n == 2 && s[0] == 'O' && s[1] == 'N') {
+        ld_presence = 1;
+        ld_last_rx = HAL_GetTick();
+    } else if(n == 3 && s[0] == 'O' && s[1] == 'F' && s[2] == 'F') {
+        ld_presence = 0;
+        ld_last_rx = HAL_GetTick();
+    } else if(n > 6 && strncmp(s, "Range ", 6) == 0) {
+        uint32_t v = 0;
+        for(uint8_t i = 6; i < n; i++) {
+            if(s[i] < '0' || s[i] > '9') return;
+            v = v * 10 + (s[i] - '0');
+            if(v > 65535) return;
+        }
+        ld_range_cm = (uint16_t)v;
+        ld_last_rx = HAL_GetTick();
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if(huart->Instance == USART1) {
+        char c = (char)ld_rx_byte;
+        if(c == '\r' || c == '\n') {
+            if(ld_line_len > 0) {
+                ld_parse_line(ld_line, ld_line_len);
+                ld_line_len = 0;
+            }
+        } else if(ld_line_len < LD_LINE_MAX - 1) {
+            ld_line[ld_line_len++] = c;
+        } else {
+            /* overflow — drop the in-progress line */
+            ld_line_len = 0;
+        }
+        HAL_UART_Receive_IT(&huart1, &ld_rx_byte, 1);
     }
 }
 /* USER CODE END 4 */
