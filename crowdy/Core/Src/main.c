@@ -76,13 +76,13 @@ volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window
      MED_THR <= x < HIGH  -> MEDIUM
      x >= HIGH_THR        -> HIGH
    Measured single-occupant values: mic RMS ~1615, vib ~122. */
-#define MIC_LOW_THR     1600.0f
+#define MIC_LOW_THR     1700.0f
 #define MIC_MED_THR     1800.0f
-#define MIC_HIGH_THR    2000.0f
+#define MIC_HIGH_THR    1900.0f
 
-#define VIB_LOW_THR     113.0f
-#define VIB_MED_THR     150.0f
-#define VIB_HIGH_THR    200.0f
+#define VIB_LOW_THR     18.0f
+#define VIB_MED_THR     25.0f
+#define VIB_HIGH_THR    30.0f
 #define VIB_INVALID_THR 2000.0f    /* reading above this => sensor unplugged, ignore */
 
 /* Radar uses inverted thresholds: closer range => more crowded.
@@ -90,9 +90,9 @@ volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window
      LOW_THR  < range <= EMPTY_THR                  -> LOW
      HIGH_THR < range <= LOW_THR                    -> MEDIUM
      range <= HIGH_THR                              -> HIGH  */
-#define RADAR_EMPTY_THR 400       /* range in cm */
-#define RADAR_LOW_THR   250
-#define RADAR_HIGH_THR  100
+#define RADAR_EMPTY_THR 200       /* range in cm */
+#define RADAR_LOW_THR   50
+#define RADAR_HIGH_THR  20
 
 /* Fusion weights (need not sum to 1; combined level is the rounded
    weighted mean of the per-sensor levels). */
@@ -205,10 +205,11 @@ last_print = HAL_GetTick();
 
     char vib_lvl_ch = vib_valid ? (char)('0' + lvl_vib) : '-';
 
-    char msg[160];
+    char msg[200];
     snprintf(msg, sizeof(msg),
-        "RMS: %.2f | VIB: %.2f | RADAR: %s R=%u avg=%u | M:%u V:%c R:%u => %s\r\n",
-        mic_rms, vib_avg,
+        "MIC raw:%-4u rms:%7.2f | VIB raw:%-4u avg:%6.2f | RADAR %s raw:%-4u avg:%-4u | M:%u V:%c R:%u => %s\r\n",
+        adc_vals[0], mic_rms,
+        adc_vals[1], vib_avg,
         ld_presence ? "ON " : "OFF", ld_range_cm, range_avg,
         lvl_mic, vib_lvl_ch, lvl_rad, level_name(lvl_combined));
 
