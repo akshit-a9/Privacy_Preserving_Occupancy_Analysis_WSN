@@ -85,6 +85,8 @@ volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window
 #define VIB_HIGH_THR    30.0f
 #define VIB_INVALID_THR 2000.0f    /* reading above this => sensor unplugged, ignore */
 
+#define MIC_INVALID_THR 500.0f     /* RMS below this => mic unplugged, ignore */
+
 /* Radar uses inverted thresholds: closer range => more crowded.
      presence OFF, no samples, OR range > EMPTY_THR -> EMPTY
      LOW_THR  < range <= EMPTY_THR                  -> LOW
@@ -182,36 +184,54 @@ last_print = HAL_GetTick();
                          ? (uint16_t)(ld_range_sum / ld_range_n)
                          : 0u;
 
-    uint8_t lvl_mic = classify(mic_rms, MIC_LOW_THR, MIC_MED_THR, MIC_HIGH_THR);
+    uint8_t mic_valid = (mic_rms >= MIC_INVALID_THR);
     uint8_t vib_valid = (vib_avg <= VIB_INVALID_THR);
+    uint8_t rad_valid = (range_avg > 0);
+
+    uint8_t lvl_mic = mic_valid
+                      ? classify(mic_rms, MIC_LOW_THR, MIC_MED_THR, MIC_HIGH_THR)
+                      : 0;
     uint8_t lvl_vib = vib_valid
                       ? classify(vib_avg, VIB_LOW_THR, VIB_MED_THR, VIB_HIGH_THR)
                       : 0;
 
-    /* Radar: inverted — closer => more crowded. Presence OFF, no samples,
-       or range beyond EMPTY_THR all short-circuit to EMPTY. */
+    /* Radar: inverted — closer => more crowded. Presence OFF or range beyond
+       EMPTY_THR short-circuit to EMPTY. range_avg==0 => sensor disconnected. */
     uint8_t lvl_rad;
-    if(!ld_presence || ld_range_n == 0)      lvl_rad = 0;
+    if(!rad_valid)                           lvl_rad = 0;
+    else if(!ld_presence)                    lvl_rad = 0;
     else if(range_avg >  RADAR_EMPTY_THR)    lvl_rad = 0;
     else if(range_avg >  RADAR_LOW_THR)      lvl_rad = 1;
     else if(range_avg >  RADAR_HIGH_THR)     lvl_rad = 2;
     else                                     lvl_rad = 3;
 
-    float w_vib_eff = vib_valid ? W_VIB : 0.0f;
-    float w_sum   = W_MIC + w_vib_eff + W_RADAR;
-    float lvl_num = (W_MIC * lvl_mic + w_vib_eff * lvl_vib + W_RADAR * lvl_rad) / w_sum;
-    uint8_t lvl_combined = (uint8_t)(lvl_num + 0.5f);   /* round */
-    if(lvl_combined > 3) lvl_combined = 3;
+    uint8_t disc_count = (!mic_valid) + (!vib_valid) + (!rad_valid);
 
-    char vib_lvl_ch = vib_valid ? (char)('0' + lvl_vib) : '-';
+    char msg[220];
+    if(disc_count == 3) {
+        snprintf(msg, sizeof(msg), "All sensors disconnected\r\n");
+    } else {
+        float w_mic_eff = mic_valid ? W_MIC   : 0.0f;
+        float w_vib_eff = vib_valid ? W_VIB   : 0.0f;
+        float w_rad_eff = rad_valid ? W_RADAR : 0.0f;
+        float w_sum     = w_mic_eff + w_vib_eff + w_rad_eff;
+        float lvl_num   = (w_mic_eff * lvl_mic + w_vib_eff * lvl_vib + w_rad_eff * lvl_rad) / w_sum;
+        uint8_t lvl_combined = (uint8_t)(lvl_num + 0.5f);   /* round */
+        if(lvl_combined > 3) lvl_combined = 3;
 
-    char msg[200];
-    snprintf(msg, sizeof(msg),
-        "MIC raw:%-4u rms:%7.2f | VIB raw:%-4u avg:%6.2f | RADAR %s raw:%-4u avg:%-4u | M:%u V:%c R:%u => %s\r\n",
-        adc_vals[0], mic_rms,
-        adc_vals[1], vib_avg,
-        ld_presence ? "ON " : "OFF", ld_range_cm, range_avg,
-        lvl_mic, vib_lvl_ch, lvl_rad, level_name(lvl_combined));
+        char mic_lvl_ch = mic_valid ? (char)('0' + lvl_mic) : '-';
+        char vib_lvl_ch = vib_valid ? (char)('0' + lvl_vib) : '-';
+        char rad_lvl_ch = rad_valid ? (char)('0' + lvl_rad) : '-';
+
+        const char *warn = (disc_count == 2) ? "  [WARNING: 2 sensors disconnected]" : "";
+
+        snprintf(msg, sizeof(msg),
+            "MIC raw:%-4u rms:%7.2f | VIB raw:%-4u avg:%6.2f | RADAR %s raw:%-4u avg:%-4u | M:%c V:%c R:%c => %s%s\r\n",
+            adc_vals[0], mic_rms,
+            adc_vals[1], vib_avg,
+            ld_presence ? "ON " : "OFF", ld_range_cm, range_avg,
+            mic_lvl_ch, vib_lvl_ch, rad_lvl_ch, level_name(lvl_combined), warn);
+    }
 
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 }
