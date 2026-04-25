@@ -76,12 +76,12 @@ volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window
      MED_THR <= x < HIGH  -> MEDIUM
      x >= HIGH_THR        -> HIGH
    Measured single-occupant values: mic RMS ~1615, vib ~122. */
-#define MIC_LOW_THR     1700.0f
-#define MIC_MED_THR     1800.0f
-#define MIC_HIGH_THR    1900.0f
+#define MIC_LOW_THR     1600.0f
+#define MIC_MED_THR     1700.0f
+#define MIC_HIGH_THR    1800.0f
 
-#define VIB_LOW_THR     18.0f
-#define VIB_MED_THR     25.0f
+#define VIB_LOW_THR     16.0f
+#define VIB_MED_THR     22.0f
 #define VIB_HIGH_THR    30.0f
 #define VIB_INVALID_THR 2000.0f    /* reading above this => sensor unplugged, ignore */
 
@@ -93,8 +93,8 @@ volatile uint32_t ld_range_n   = 0;  /* count of range samples in current window
      HIGH_THR < range <= LOW_THR                    -> MEDIUM
      range <= HIGH_THR                              -> HIGH  */
 #define RADAR_EMPTY_THR 200       /* range in cm */
-#define RADAR_LOW_THR   50
-#define RADAR_HIGH_THR  20
+#define RADAR_LOW_THR   25
+#define RADAR_HIGH_THR  10
 
 /* Fusion weights (need not sum to 1; combined level is the rounded
    weighted mean of the per-sensor levels). */
