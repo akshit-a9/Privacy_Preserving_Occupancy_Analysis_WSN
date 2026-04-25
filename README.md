@@ -29,7 +29,6 @@ crowdy/
 │   ├── 02_Circuit_Diagram_Transparent.png
 │   ├── 03_Nucleo User Manual.pdf
 │   ├── 03_Pin Layout - STM32F446RE.jpeg
-│   ├── 04_Final_Report_Draft.md
 │   ├── HLK-LD2420 Protocol Document.pdf
 │   └── HLK-LD2420-Product-Manual V1.2.pdf
 │
@@ -65,8 +64,4 @@ python tools/monitor.py --port /dev/ttyACM0    # Linux / macOS
 
 The dashboard shows live raw sensor values, per-sensor connection status, and the fused occupancy class (Empty / Low / Medium / High). Find the correct port under *Device Manager → Ports (COM & LPT)* on Windows, or with `ls /dev/tty.usbmodem*` on macOS / `dmesg | tail` on Linux.
 
-Use `--replay <capture.log>` for offline playback of a saved UART capture, and `--baud <rate>` to override the default 115200.
-
-## Documentation
-
-The full system design, protocol choices (TPSN, GEAR), sensor fusion pipeline, and validation results are documented in [docs/04_Final_Report_Draft.md](docs/04_Final_Report_Draft.md).
+Use `--replay <capture.log>` for offline playback of a saved UART capture, and `--baud <rate>` to override the default 115200.   
